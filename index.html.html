@@ -1,0 +1,777 @@
+<!--
+  REGIMEN v4 — persönliches Körper- & Arbeits-Ledger
+  Bereiche (untere Leiste): Heute · Gym · Arbeit(To-do) · Links · Mehr
+  Unter "Mehr": Supplements · Pflege · Notizen · Körper · Empfangen · Daten
+  ----------------------------------------------------------------------------
+  Single-File-PWA, offline lauffähig. Daten im localStorage ("regimen.v1").
+  Zusätzlich automatische Wiederherstellungspunkte ("regimen.backups.v1").
+
+  ROBUSTHEITS-REGEL: Alles aus HTML-Attributen (onclick/oninput/...) läuft über
+  das globale Objekt window.R. Handler rufen IMMER R.xyz(...) — nie eine nackte
+  Funktion, nie direkt eine Script-Variable.
+
+  PERSISTENZ: save() schreibt bei JEDER Änderung sofort + legt täglich einen
+  Wiederherstellungspunkt an. migrate() ergänzt fehlende Felder bei Updates.
+
+  ERINNERUNGEN: Eine PWA kann keine Hintergrund-Pushes. Aufgaben mit Termin
+  liefern daher eine .ics-Datei mit Alarm -> Apple Kalender erinnert echt.
+-->
+<!DOCTYPE html>
+<html lang="de">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, maximum-scale=1, user-scalable=no" />
+<title>Regimen</title>
+<meta name="apple-mobile-web-app-capable" content="yes" />
+<meta name="mobile-web-app-capable" content="yes" />
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+<meta name="apple-mobile-web-app-title" content="Regimen" />
+<meta name="theme-color" content="#14110f" />
+<link rel="apple-touch-icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 180 180'%3E%3Crect width='180' height='180' rx='40' fill='%2314110f'/%3E%3Ctext x='90' y='118' font-family='Georgia,serif' font-size='96' fill='%23b4533c' text-anchor='middle'%3ER%3C/text%3E%3C/svg%3E" />
+<link rel="preconnect" href="https://fonts.googleapis.com" />
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+<link href="https://fonts.googleapis.com/css2?family=Spectral:wght@400;500;600&display=swap" rel="stylesheet" />
+<style>
+  :root{
+    --bg:#14110f; --surface:#1e1a17; --surface-2:#262019; --line:#2e2823; --line-2:#3a322a;
+    --text:#e8e0d2; --muted:#9a8e7c; --faint:#6c6155; --accent:#b4533c; --accent-dim:#7e3a2b;
+    --good:#7d9b76; --warn:#c9a14a; --radius:14px; --radius-sm:10px; --tabbar-h:64px;
+  }
+  *{ box-sizing:border-box; -webkit-tap-highlight-color:transparent; }
+  html,body{ margin:0; padding:0; height:100%; }
+  body{ background:var(--bg); color:var(--text);
+    font-family:-apple-system,BlinkMacSystemFont,"SF Pro Text","Segoe UI",Roboto,sans-serif;
+    font-size:16px; line-height:1.45; -webkit-font-smoothing:antialiased; overscroll-behavior-y:none; }
+  .serif{ font-family:"Spectral",Georgia,"Times New Roman",serif; }
+  #app{ max-width:560px; margin:0 auto; min-height:100%; position:relative; }
+
+  header.top{ position:sticky; top:0; z-index:20; padding:calc(env(safe-area-inset-top) + 14px) 18px 12px;
+    background:linear-gradient(to bottom, var(--bg) 70%, transparent);
+    display:flex; align-items:baseline; justify-content:space-between; }
+  header.top h1{ font-family:"Spectral",Georgia,serif; font-weight:600; font-size:24px;
+    letter-spacing:.14em; margin:0; text-transform:uppercase; }
+  header.top h1 .dot{ color:var(--accent); }
+  .ghost-btn{ background:none; border:1px solid var(--line-2); color:var(--muted);
+    border-radius:99px; padding:6px 12px; font-size:13px; cursor:pointer; }
+  .ghost-btn:active{ background:var(--surface); }
+
+  main{ padding:4px 16px calc(var(--tabbar-h) + env(safe-area-inset-bottom) + 24px); }
+
+  .segment{ display:flex; gap:3px; background:var(--surface); border:1px solid var(--line);
+    border-radius:var(--radius-sm); padding:4px; margin:6px 0 16px; }
+  .segment button{ flex:1; border:none; background:none; color:var(--muted);
+    padding:8px 2px; border-radius:7px; font-size:13.5px; cursor:pointer; font-weight:500; }
+  .segment button.active{ background:var(--surface-2); color:var(--text); box-shadow:inset 0 0 0 1px var(--line-2); }
+
+  .card{ background:var(--surface); border:1px solid var(--line);
+    border-radius:var(--radius); padding:14px 16px; margin-bottom:12px; position:relative; }
+  .card.lead{ border-left:3px solid var(--accent); }
+  .card.tight{ padding:12px 14px; }
+  .row{ display:flex; align-items:center; gap:12px; }
+  .row.between{ justify-content:space-between; }
+  .stack{ display:flex; flex-direction:column; gap:2px; min-width:0; }
+  .title{ font-size:16px; font-weight:600; }
+  .sub{ font-size:13px; color:var(--muted); }
+  .tiny{ font-size:12px; color:var(--faint); }
+  .truncate{ white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+
+  .eyebrow{ font-size:11px; letter-spacing:.16em; text-transform:uppercase; color:var(--faint); margin:22px 2px 8px; display:flex; justify-content:space-between; align-items:center; }
+  .eyebrow:first-child{ margin-top:6px; }
+  .screen-title{ font-family:"Spectral",Georgia,serif; font-size:26px; margin:8px 2px 2px; }
+
+  .btn{ display:inline-flex; align-items:center; justify-content:center; gap:8px; border:none;
+    border-radius:var(--radius-sm); padding:12px 16px; font-size:15px; font-weight:600; cursor:pointer; }
+  .btn.primary{ background:var(--accent); color:#1b1410; }
+  .btn.primary:active{ background:var(--accent-dim); }
+  .btn.block{ width:100%; }
+  .btn.subtle{ background:var(--surface-2); color:var(--text); box-shadow:inset 0 0 0 1px var(--line-2); }
+  .btn.ghost{ background:none; color:var(--muted); box-shadow:inset 0 0 0 1px var(--line-2); }
+  .btn.sm{ padding:8px 12px; font-size:13px; }
+  .icon-btn{ background:none; border:none; color:var(--faint); font-size:18px; cursor:pointer; padding:6px; line-height:1; }
+  .icon-btn:active{ color:var(--text); }
+  .back{ background:none; border:none; color:var(--muted); font-size:15px; cursor:pointer; padding:6px 0; }
+
+  input[type=text], input[type=number], input[type=url], input[type=date], input[type=time], textarea, select{
+    background:var(--surface-2); border:1px solid var(--line-2); color:var(--text);
+    border-radius:var(--radius-sm); padding:11px 12px; font-size:16px; width:100%; font-family:inherit; }
+  input::placeholder, textarea::placeholder{ color:var(--faint); }
+  input:focus, textarea:focus, select:focus{ outline:none; border-color:var(--accent-dim); }
+  textarea{ resize:vertical; min-height:80px; line-height:1.5; }
+  label.field{ display:block; margin-bottom:12px; }
+  label.field > span{ display:block; font-size:12px; color:var(--muted); margin-bottom:5px; letter-spacing:.04em; }
+  .grid2{ display:grid; grid-template-columns:1fr 1fr; gap:10px; }
+
+  .check{ display:flex; align-items:center; gap:14px; padding:13px 4px; cursor:pointer; border-bottom:1px solid var(--line); }
+  .check:last-child{ border-bottom:none; }
+  .box{ width:24px; height:24px; border-radius:7px; border:1.5px solid var(--line-2); flex:0 0 auto; display:grid; place-items:center; transition:all .12s; }
+  .check.done .box{ background:var(--good); border-color:var(--good); }
+  .box svg{ width:14px; height:14px; opacity:0; }
+  .check.done .box svg{ opacity:1; }
+  .check.done .title{ color:var(--muted); text-decoration:line-through; text-decoration-color:var(--faint); }
+
+  .setrow{ display:grid; grid-template-columns:26px 1fr 1fr 34px; gap:8px; align-items:center; margin-bottom:8px; }
+  .setrow .idx{ color:var(--faint); font-size:13px; text-align:center; }
+  .lastref{ font-size:12px; color:var(--good); margin-top:2px; }
+  .lastref.none{ color:var(--faint); }
+
+  .delta{ font-size:12px; font-weight:600; padding:1px 7px; border-radius:99px; }
+  .delta.up{ color:var(--good); background:rgba(125,155,118,.13); }
+  .delta.flat{ color:var(--muted); background:var(--surface-2); }
+  .badge{ font-size:12px; font-weight:600; color:var(--warn); background:rgba(201,161,74,.12); padding:2px 9px; border-radius:99px; }
+  .pill{ font-size:12px; color:var(--muted); }
+  .pr{ font-size:11px; font-weight:700; color:var(--warn); letter-spacing:.03em; }
+
+  .empty{ text-align:center; color:var(--muted); padding:42px 20px; }
+  .empty .serif{ font-size:19px; color:var(--text); margin-bottom:6px; }
+
+  .bar{ height:6px; background:var(--surface-2); border-radius:99px; overflow:hidden; margin-top:8px; }
+  .bar > span{ display:block; height:100%; background:var(--good); border-radius:99px; }
+
+  .chips{ display:flex; gap:8px; overflow-x:auto; padding:2px 0 10px; -webkit-overflow-scrolling:touch; }
+  .chips::-webkit-scrollbar{ display:none; }
+  .chip{ flex:0 0 auto; border:1px solid var(--line-2); background:var(--surface); color:var(--muted);
+    border-radius:99px; padding:7px 14px; font-size:13px; cursor:pointer; white-space:nowrap; }
+  .chip.active{ background:var(--accent); color:#1b1410; border-color:var(--accent); font-weight:600; }
+  .chip.manage{ color:var(--faint); }
+
+  .linkcard{ display:flex; gap:12px; }
+  .thumb{ width:108px; height:64px; flex:0 0 auto; border-radius:8px; object-fit:cover; background:var(--surface-2); }
+  .thumb.placeholder{ display:grid; place-items:center; color:var(--faint); font-size:22px; }
+
+  /* To-do */
+  .prio{ width:9px; height:9px; border-radius:99px; flex:0 0 auto; }
+  .prio.high{ background:var(--accent); } .prio.med{ background:var(--warn); } .prio.low{ background:var(--faint); }
+  .tag{ font-size:11px; color:var(--muted); background:var(--surface-2); padding:1px 8px; border-radius:99px; }
+  .taskmeta{ display:flex; gap:8px; align-items:center; flex-wrap:wrap; margin-top:3px; }
+  .overdue{ color:var(--accent); }
+  .cal-head, .cal-grid{ display:grid; grid-template-columns:repeat(7,1fr); gap:4px; }
+  .cal-head span{ text-align:center; font-size:11px; color:var(--faint); padding:2px 0; }
+  .cal-cell{ aspect-ratio:1/1; border-radius:8px; display:flex; align-items:center; justify-content:center;
+    font-size:14px; color:var(--muted); cursor:pointer; position:relative; background:var(--surface); border:1px solid transparent; }
+  .cal-cell.out{ opacity:.35; }
+  .cal-cell.today{ border-color:var(--line-2); color:var(--text); font-weight:600; }
+  .cal-cell.sel{ background:var(--accent); color:#1b1410; font-weight:600; }
+  .cal-cell .dd{ width:5px; height:5px; border-radius:99px; background:var(--accent); position:absolute; bottom:5px; }
+  .cal-cell.sel .dd{ background:#1b1410; }
+
+  nav.tabs{ position:fixed; bottom:0; left:0; right:0; z-index:30; max-width:560px; margin:0 auto;
+    display:flex; background:rgba(20,17,15,.92); backdrop-filter:blur(14px); -webkit-backdrop-filter:blur(14px);
+    border-top:1px solid var(--line); padding-bottom:env(safe-area-inset-bottom); }
+  nav.tabs button{ flex:1; background:none; border:none; color:var(--faint); padding:9px 0 8px;
+    cursor:pointer; display:flex; flex-direction:column; align-items:center; gap:3px; }
+  nav.tabs button.active{ color:var(--accent); }
+  nav.tabs .tlabel{ font-size:10.5px; letter-spacing:.02em; }
+  nav.tabs svg{ width:22px; height:22px; }
+
+  .scrim{ position:fixed; inset:0; background:rgba(0,0,0,.55); z-index:40; opacity:0; transition:opacity .18s; }
+  .scrim.show{ opacity:1; }
+  .sheet{ position:fixed; left:0; right:0; bottom:0; z-index:41; max-width:560px; margin:0 auto;
+    background:var(--surface); border-top-left-radius:20px; border-top-right-radius:20px;
+    border-top:1px solid var(--line-2); padding:8px 18px calc(env(safe-area-inset-bottom) + 20px);
+    transform:translateY(100%); transition:transform .22s cubic-bezier(.2,.8,.2,1); max-height:90vh; overflow:auto; }
+  .sheet.show{ transform:translateY(0); }
+  .grabber{ width:38px; height:4px; background:var(--line-2); border-radius:99px; margin:8px auto 14px; }
+  .sheet h2{ font-family:"Spectral",Georgia,serif; font-weight:600; font-size:20px; margin:2px 0 16px; }
+  .menurow{ width:100%; text-align:left; background:none; border:none; color:var(--text);
+    padding:15px 4px; font-size:16px; cursor:pointer; border-bottom:1px solid var(--line);
+    display:flex; justify-content:space-between; align-items:center; }
+  .menurow:last-child{ border-bottom:none; }
+  .menurow .ar{ color:var(--faint); }
+
+  table.cmp{ width:100%; border-collapse:collapse; font-size:14px; margin-top:4px; }
+  table.cmp th, table.cmp td{ text-align:left; padding:8px 6px; border-bottom:1px solid var(--line); }
+  table.cmp th{ color:var(--faint); font-weight:500; font-size:12px; text-transform:uppercase; letter-spacing:.06em; }
+  table.cmp td.diff{ color:var(--warn); }
+
+  .danger{ color:var(--accent); }
+  hr.div{ border:none; border-top:1px solid var(--line); margin:18px 0; }
+  .spacer{ height:6px; }
+  @media (prefers-reduced-motion: reduce){ *{ transition:none !important; } }
+</style>
+</head>
+<body>
+<div id="app">
+  <header class="top">
+    <h1>Regimen<span class="dot">.</span></h1>
+    <button class="ghost-btn" onclick="R.openData()">Backup</button>
+  </header>
+  <main id="view"></main>
+
+  <nav class="tabs" id="tabbar">
+    <button data-tab="today" onclick="R.go('today')">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><path d="M3 10.5 12 4l9 6.5V20a1 1 0 0 1-1 1h-5v-6H9v6H4a1 1 0 0 1-1-1z"/></svg>
+      <span class="tlabel">Heute</span>
+    </button>
+    <button data-tab="gym" onclick="R.go('gym')">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><path d="M6.5 6.5v11M17.5 6.5v11M4 9v6M20 9v6M6.5 12h11"/></svg>
+      <span class="tlabel">Gym</span>
+    </button>
+    <button data-tab="todo" onclick="R.go('todo')">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><path d="M9 11l3 3 8-8M4 7h6M4 12h4M4 17h8"/></svg>
+      <span class="tlabel">Arbeit</span>
+    </button>
+    <button data-tab="links" onclick="R.go('links')">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><path d="M10 14a4 4 0 0 0 5.66 0l3-3a4 4 0 1 0-5.66-5.66l-1 1M14 10a4 4 0 0 0-5.66 0l-3 3a4 4 0 1 0 5.66 5.66l1-1"/></svg>
+      <span class="tlabel">Links</span>
+    </button>
+    <button data-tab="more" onclick="R.go('more')">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><circle cx="5" cy="12" r="1.6"/><circle cx="12" cy="12" r="1.6"/><circle cx="19" cy="12" r="1.6"/></svg>
+      <span class="tlabel">Mehr</span>
+    </button>
+  </nav>
+</div>
+
+<script>
+/* =========================================================================
+   1) SPEICHER + AUTOMATISCHE WIEDERHERSTELLUNGSPUNKTE
+   ========================================================================= */
+const Store = (() => {
+  const KEY="regimen.v1", BKEY="regimen.backups.v1";
+  let mem=null;
+  function read(){ try{ const r=localStorage.getItem(KEY); return r?JSON.parse(r):null; }catch(e){ return mem; } }
+  function write(d){ mem=d; try{ localStorage.setItem(KEY, JSON.stringify(d)); }catch(e){} }
+  /* Legt pro Tag EINEN Wiederherstellungspunkt an, hält die letzten 7. */
+  function snapshot(d){ try{
+    let arr=JSON.parse(localStorage.getItem(BKEY)||"[]"); const day=isoOf(new Date());
+    const entry={ day, ts:Date.now(), data:JSON.stringify(d) };
+    if(arr.length && arr[arr.length-1].day===day) arr[arr.length-1]=entry; else arr.push(entry);
+    if(arr.length>7) arr=arr.slice(-7);
+    localStorage.setItem(BKEY, JSON.stringify(arr));
+  }catch(e){} }
+  function backups(){ try{ return JSON.parse(localStorage.getItem(BKEY)||"[]"); }catch(e){ return []; } }
+  return { read, write, snapshot, backups };
+})();
+
+/* =========================================================================
+   2) ZUSTAND + MIGRATION
+   ========================================================================= */
+function defaultLibrary(){ return { categories:["Supplements","Looksmaxxing","Skincare","Gym","Style","Verschiedenes"].map(n=>({id:uid(),name:n})), links:[] }; }
+function defaultState(){
+  return {
+    version:4,
+    plan:{ workouts:[
+      { id:uid(), name:"Push", exercises:[ {id:uid(),name:"Bankdrücken",sets:4,reps:8},{id:uid(),name:"Schulterdrücken",sets:3,reps:10},{id:uid(),name:"Trizeps-Pushdown",sets:3,reps:12} ]},
+      { id:uid(), name:"Pull", exercises:[ {id:uid(),name:"Klimmzüge",sets:4,reps:6},{id:uid(),name:"Rudern",sets:4,reps:10},{id:uid(),name:"Bizeps-Curls",sets:3,reps:12} ]},
+      { id:uid(), name:"Legs", exercises:[ {id:uid(),name:"Kniebeugen",sets:4,reps:8},{id:uid(),name:"Rumänisches Kreuzheben",sets:3,reps:10},{id:uid(),name:"Wadenheben",sets:4,reps:15} ]},
+    ]},
+    logs:[], notes:[], supps:[], skin:{morning:[],evening:[]},
+    checks:{}, library:defaultLibrary(), body:{weights:[],measures:[]},
+    tasks:[]
+  };
+}
+function migrate(s){
+  if(!s.plan) s.plan={workouts:[]}; if(!s.logs) s.logs=[]; if(!s.notes) s.notes=[];
+  if(!s.supps) s.supps=[]; if(!s.skin) s.skin={morning:[],evening:[]}; if(!s.checks) s.checks={};
+  if(!s.library) s.library=defaultLibrary(); if(!s.library.categories) s.library.categories=defaultLibrary().categories; if(!s.library.links) s.library.links=[];
+  if(!s.body) s.body={weights:[],measures:[]}; if(!s.body.weights) s.body.weights=[]; if(!s.body.measures) s.body.measures=[];
+  if(!s.tasks) s.tasks=[];
+  s.version=4; return s;
+}
+
+let state = migrate(Store.read() || defaultState());
+let view="today", gymTab="track", skinTab="morning", libCat="all";
+let todoView="list", calMonth=startOfMonth(new Date()), calSel=todayISO();
+let activeSession=null, sheetDraft=null, pendingImport=null;
+
+function save(){ Store.write(state); Store.snapshot(state); render(); }
+
+/* =========================================================================
+   3) HILFSFUNKTIONEN
+   ========================================================================= */
+function uid(){ return Math.random().toString(36).slice(2,9)+Date.now().toString(36).slice(-3); }
+function pad(n){ return String(n).padStart(2,"0"); }
+function isoOf(d){ return d.getFullYear()+"-"+pad(d.getMonth()+1)+"-"+pad(d.getDate()); }
+function todayISO(){ return isoOf(new Date()); }
+function isoFromTs(ts){ return isoOf(new Date(ts)); }
+function startOfMonth(d){ return new Date(d.getFullYear(), d.getMonth(), 1); }
+function addDaysISO(iso,n){ const [y,m,d]=iso.split("-").map(Number); const dt=new Date(y,m-1,d); dt.setDate(dt.getDate()+n); return isoOf(dt); }
+function esc(s){ return String(s==null?"":s).replace(/[&<>"']/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c])); }
+function fmtDate(iso){ const [y,m,d]=iso.split("-"); const mo=["Jan","Feb","Mär","Apr","Mai","Jun","Jul","Aug","Sep","Okt","Nov","Dez"]; return parseInt(d)+". "+mo[parseInt(m)-1]+" "+y; }
+function fmtDateShort(iso){ const [y,m,d]=iso.split("-"); return parseInt(d)+"."+parseInt(m)+"."; }
+function monthLabel(d){ const mo=["Januar","Februar","März","April","Mai","Juni","Juli","August","September","Oktober","November","Dezember"]; return mo[d.getMonth()]+" "+d.getFullYear(); }
+function lastPerformance(name){ for(let i=state.logs.length-1;i>=0;i--){ const e=state.logs[i].entries.find(en=>en.exerciseName===name); if(e&&e.sets.length) return {date:state.logs[i].dateISO,sets:e.sets}; } return null; }
+function topSet(sets){ return sets.reduce((a,s)=>(s.weight>a.weight?s:a), sets[0]); }
+
+function encodePayload(o){ return btoa(unescape(encodeURIComponent(JSON.stringify(o)))); }
+function decodePayload(s){ return JSON.parse(decodeURIComponent(escape(atob(s)))); }
+
+function ytId(u){ const m=String(u).match(/(?:youtube\.com\/(?:watch\?v=|embed\/|shorts\/)|youtu\.be\/)([A-Za-z0-9_-]{11})/); return m?m[1]:null; }
+function ytThumb(id){ return "https://img.youtube.com/vi/"+id+"/hqdefault.jpg"; }
+async function fetchYtTitle(u){ try{ const r=await fetch("https://www.youtube.com/oembed?format=json&url="+encodeURIComponent(u)); if(!r.ok) return null; const j=await r.json(); return j.title||null; }catch(e){ return null; } }
+
+function dayComplete(day,keys){ if(!keys.length) return false; const c=state.checks[day]; if(!c) return false; return keys.every(k=>c[k]); }
+function streak(keys){ if(!keys.length) return 0; let n=0; const d=new Date(); if(!dayComplete(isoOf(d),keys)) d.setDate(d.getDate()-1); while(dayComplete(isoOf(d),keys)){ n++; d.setDate(d.getDate()-1); } return n; }
+function suppKeys(){ return state.supps.map(s=>s.id); }
+function skinKeys(){ return state.skin.morning.map(s=>"morning:"+s.id).concat(state.skin.evening.map(s=>"evening:"+s.id)); }
+
+/* =========================================================================
+   4) NAVIGATION
+   ========================================================================= */
+function go(tab){ view=tab; render(); window.scrollTo(0,0); }
+function render(){
+  const overflow=["more","supps","skin","notes","body"];
+  document.querySelectorAll("#tabbar button").forEach(b=>{
+    const t=b.dataset.tab; b.classList.toggle("active", t===view || (t==="more"&&overflow.indexOf(view)>=0)); });
+  const map={ today:renderToday, gym:renderGym, todo:renderTodo, links:renderLinks, more:renderMore,
+    supps:renderSupps, skin:renderSkin, notes:renderNotes, body:renderBody };
+  document.getElementById("view").innerHTML=(map[view]||renderToday)();
+}
+
+/* =========================================================================
+   5) HEUTE — Dashboard
+   ========================================================================= */
+function renderToday(){
+  const t=todayISO();
+  let h='<div class="screen-title">Heute</div><div class="sub" style="margin:0 2px 12px">'+fmtDate(t)+'</div>';
+
+  // Aufgaben (überfällig + heute)
+  const due=state.tasks.filter(x=>!x.done && x.dueISO && x.dueISO<=t).sort(taskSort);
+  if(due.length){
+    h+='<div class="card lead"><div class="row between"><span class="title">Aufgaben fällig</span><span class="badge">'+due.length+'</span></div>';
+    due.slice(0,5).forEach(x=>{ h+=taskRow(x,true); });
+    h+='<button class="btn ghost block sm" style="margin-top:10px" onclick="R.go(\'todo\')">Alle Aufgaben</button></div>';
+  }
+
+  // Supplements
+  const sk=suppKeys(); const sDone=sk.filter(k=>state.checks[t]&&state.checks[t][k]).length;
+  h+='<div class="card lead"><div class="row between"><span class="title">Supplements</span>'+(sk.length?streakBadge(streak(sk)):'')+'</div>';
+  if(!sk.length) h+='<div class="sub" style="margin-top:6px">Noch kein Stack. <a onclick="R.go(\'supps\')" style="color:var(--accent);cursor:pointer">Anlegen</a></div>';
+  else{ h+=progressBar(sDone,sk.length); state.supps.forEach(s=>{ const done=!!(state.checks[t]&&state.checks[t][s.id]);
+    h+='<div class="check '+(done?"done":"")+'" onclick="R.toggleCheck(\''+s.id+'\')"><span class="box">'+checkSvg()+'</span><div class="stack" style="flex:1"><span class="title">'+esc(s.name)+'</span><span class="sub">'+esc([s.dose,s.timing].filter(Boolean).join(" · ")||"—")+'</span></div></div>'; }); }
+  h+='</div>';
+
+  // Pflege
+  const mk=state.skin.morning.map(s=>"morning:"+s.id), ek=state.skin.evening.map(s=>"evening:"+s.id);
+  const mDone=mk.filter(k=>state.checks[t]&&state.checks[t][k]).length, eDone=ek.filter(k=>state.checks[t]&&state.checks[t][k]).length;
+  h+='<div class="card lead" onclick="R.go(\'skin\')" style="cursor:pointer"><div class="row between"><span class="title">Pflege</span>'+(skinKeys().length?streakBadge(streak(skinKeys())):'')+'</div><div class="sub" style="margin-top:6px">Morgens '+mDone+'/'+mk.length+'  ·  Abends '+eDone+'/'+ek.length+'</div>'+(skinKeys().length?progressBar(mDone+eDone,mk.length+ek.length):'<div class="sub" style="margin-top:4px">Noch keine Routine.</div>')+'</div>';
+
+  // Training
+  const last=state.logs[state.logs.length-1];
+  h+='<div class="card lead"><div class="row between"><span class="title">Training</span><button class="btn primary sm" onclick="R.go(\'gym\')">Workout starten</button></div>'+(last?'<div class="sub" style="margin-top:6px">Zuletzt: '+esc(last.workoutName)+' · '+fmtDate(last.dateISO)+'</div>':'<div class="sub" style="margin-top:6px">Noch keine Session geloggt.</div>')+'</div>';
+
+  // Körper
+  const w=state.body.weights; const cur=w.length?w[w.length-1]:null; let trend="";
+  if(w.length>=2){ const d=+(w[w.length-1].kg-w[0].kg).toFixed(1); trend=(d>0?"+":"")+d+" kg seit Start"; }
+  h+='<div class="card lead" onclick="R.go(\'body\')" style="cursor:pointer"><div class="row between"><div class="stack"><span class="title">Körpergewicht</span><span class="sub">'+(cur?cur.kg+" kg · "+fmtDate(cur.dateISO):"Noch nichts erfasst")+(trend?"  ("+trend+")":"")+'</span></div>'+(w.length>=2?sparkline(w.map(x=>x.kg)):'<span class="icon-btn">›</span>')+'</div></div>';
+  return h;
+}
+function streakBadge(n){ return n>0?'<span class="badge">🔥 '+n+(n===1?" Tag":" Tage")+'</span>':'<span class="pill">noch kein Streak</span>'; }
+function progressBar(done,total){ const p=total?Math.round(done/total*100):0; return '<div class="row between" style="margin-top:6px"><span class="tiny">'+done+'/'+total+' erledigt</span><span class="tiny">'+p+'%</span></div><div class="bar"><span style="width:'+p+'%"></span></div>'; }
+function sparkline(vals){ const w=92,hg=34,mn=Math.min.apply(null,vals),mx=Math.max.apply(null,vals),rg=(mx-mn)||1;
+  const pts=vals.map((v,i)=>(i/(vals.length-1)*w).toFixed(1)+","+(hg-(v-mn)/rg*hg).toFixed(1)).join(" ");
+  return '<svg width="'+w+'" height="'+hg+'" viewBox="0 0 '+w+' '+hg+'" style="flex:0 0 auto"><polyline points="'+pts+'" fill="none" stroke="var(--good)" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>'; }
+
+/* =========================================================================
+   6) ARBEIT — To-do mit Liste + Kalender
+   ========================================================================= */
+function taskSort(a,b){ // überfällig/früher zuerst, dann Priorität
+  const da=a.dueISO||"9999", db=b.dueISO||"9999";
+  if(da!==db) return da<db?-1:1;
+  const pr={high:0,med:1,low:2}; return (pr[a.priority]||1)-(pr[b.priority]||1);
+}
+function renderTodo(){
+  let h='<div class="segment"><button class="'+(todoView==="list"?"active":"")+'" onclick="R.setTodoView(\'list\')">Liste</button><button class="'+(todoView==="cal"?"active":"")+'" onclick="R.setTodoView(\'cal\')">Kalender</button></div>';
+  h+='<button class="btn subtle block" style="margin-bottom:14px" onclick="R.editTask()">+ Aufgabe</button>';
+  return h + (todoView==="list"?renderTodoList():renderTodoCal());
+}
+function setTodoView(v){ todoView=v; render(); window.scrollTo(0,0); }
+function renderTodoList(){
+  const open=state.tasks.filter(t=>!t.done), done=state.tasks.filter(t=>t.done);
+  if(!state.tasks.length) return emptyState("Keine Aufgaben","Plane deine Arbeit – mit Termin, Priorität und Kalender-Erinnerung.");
+  const t=todayISO(), tom=addDaysISO(t,1), week=addDaysISO(t,7);
+  const buckets=[
+    ["Überfällig", x=>x.dueISO&&x.dueISO<t],
+    ["Heute", x=>x.dueISO===t],
+    ["Morgen", x=>x.dueISO===tom],
+    ["Diese Woche", x=>x.dueISO&&x.dueISO>tom&&x.dueISO<=week],
+    ["Später", x=>x.dueISO&&x.dueISO>week],
+    ["Ohne Termin", x=>!x.dueISO],
+  ];
+  let h="";
+  buckets.forEach(([label,fn])=>{ const items=open.filter(fn).sort(taskSort); if(!items.length) return;
+    h+='<div class="eyebrow"><span'+(label==="Überfällig"?' class="overdue"':'')+'>'+label+'</span><span>'+items.length+'</span></div><div class="card tight">'+items.map(x=>taskRow(x,false)).join("")+'</div>'; });
+  if(done.length){ h+='<div class="eyebrow"><span>Erledigt</span><span>'+done.length+'</span></div><div class="card tight">'+done.slice(-15).reverse().map(x=>taskRow(x,false)).join("")+'</div>'; }
+  return h;
+}
+function taskRow(x, compact){
+  const t=todayISO(); const overdue=!x.done&&x.dueISO&&x.dueISO<t;
+  const when = x.dueISO ? (fmtDateShort(x.dueISO)+(x.dueTime?" "+x.dueTime:"")) : "";
+  const meta = '<div class="taskmeta">'
+    + (x.dueISO?'<span class="tiny '+(overdue?"overdue":"")+'">'+esc(when)+'</span>':'')
+    + (x.project?'<span class="tag">'+esc(x.project)+'</span>':'')
+    + '</div>';
+  return '<div class="check '+(x.done?"done":"")+'" style="align-items:flex-start">'
+    + '<span class="box" onclick="event.stopPropagation();R.toggleTask(\''+x.id+'\')">'+checkSvg()+'</span>'
+    + '<span class="prio '+(x.priority||"med")+'" style="margin-top:7px"></span>'
+    + '<div class="stack" style="flex:1" onclick="R.editTask(\''+x.id+'\')">'
+    + '<span class="title truncate">'+esc(x.title)+'</span>'+(compact&&!x.project&&!x.dueISO?"":meta)+'</div>'
+    + (x.dueISO?'<button class="icon-btn" onclick="event.stopPropagation();R.taskToICS(\''+x.id+'\')" title="In Kalender">📅</button>':'')
+    + '</div>';
+}
+function renderTodoCal(){
+  const first=calMonth; const y=first.getFullYear(), m=first.getMonth();
+  const startWeekday=(first.getDay()+6)%7; // Mo=0
+  const daysInMonth=new Date(y,m+1,0).getDate();
+  const counts={}; state.tasks.forEach(t=>{ if(t.dueISO&&!t.done) counts[t.dueISO]=(counts[t.dueISO]||0)+1; });
+  let cells="";
+  for(let i=0;i<startWeekday;i++) cells+='<div class="cal-cell out"></div>';
+  for(let d=1;d<=daysInMonth;d++){ const iso=y+"-"+pad(m+1)+"-"+pad(d);
+    const cls=["cal-cell"]; if(iso===todayISO()) cls.push("today"); if(iso===calSel) cls.push("sel");
+    cells+='<div class="'+cls.join(" ")+'" onclick="R.calSelect(\''+iso+'\')">'+d+(counts[iso]?'<span class="dd"></span>':'')+'</div>'; }
+  const head=["Mo","Di","Mi","Do","Fr","Sa","So"].map(x=>'<span>'+x+'</span>').join("");
+  let h='<div class="card"><div class="row between" style="margin-bottom:12px"><button class="icon-btn" onclick="R.calShift(-1)">‹</button><span class="title serif">'+monthLabel(first)+'</span><button class="icon-btn" onclick="R.calShift(1)">›</button></div><div class="cal-head">'+head+'</div><div class="cal-grid">'+cells+'</div></div>';
+  // Aufgaben des gewählten Tages
+  const items=state.tasks.filter(x=>x.dueISO===calSel).sort(taskSort);
+  h+='<div class="eyebrow">'+fmtDate(calSel)+'</div>';
+  h+= items.length ? '<div class="card tight">'+items.map(x=>taskRow(x,false)).join("")+'</div>'
+                   : '<div class="card"><div class="sub">Keine Aufgaben an diesem Tag.</div></div>';
+  h+='<button class="btn ghost block sm" onclick="R.editTask(null,\''+calSel+'\')">+ Aufgabe für '+fmtDateShort(calSel)+'</button>';
+  return h;
+}
+function calShift(n){ calMonth=new Date(calMonth.getFullYear(), calMonth.getMonth()+n, 1); render(); }
+function calSelect(iso){ calSel=iso; render(); }
+function toggleTask(id){ const x=state.tasks.find(t=>t.id===id); if(!x) return; x.done=!x.done; x.doneTs=x.done?Date.now():0; save(); }
+function editTask(id, presetDate){
+  const x = id ? state.tasks.find(t=>t.id===id)
+              : { id:uid(), title:"", notes:"", dueISO:(presetDate||""), dueTime:"", priority:"med", project:"", done:false, createdTs:Date.now() };
+  sheetDraft=Object.assign({},x,{_isNew:!id});
+  const prio=p=>'<option value="'+p+'" '+(sheetDraft.priority===p?"selected":"")+'>';
+  openSheet('<h2>'+(id?"Aufgabe":"Neue Aufgabe")+'</h2>'
+    +'<label class="field"><span>Titel</span><input type="text" placeholder="Was ist zu tun?" value="'+esc(x.title)+'" oninput="R.draftField(\'title\',this.value)"></label>'
+    +'<div class="grid2"><label class="field"><span>Datum</span><input type="date" value="'+esc(x.dueISO)+'" oninput="R.draftField(\'dueISO\',this.value)"></label><label class="field"><span>Uhrzeit</span><input type="time" value="'+esc(x.dueTime)+'" oninput="R.draftField(\'dueTime\',this.value)"></label></div>'
+    +'<div class="grid2"><label class="field"><span>Priorität</span><select onchange="R.draftField(\'priority\',this.value)">'+prio("high")+'Hoch</option>'+prio("med")+'Mittel</option>'+prio("low")+'Niedrig</option></select></label><label class="field"><span>Projekt / Tag</span><input type="text" placeholder="z. B. Angebote" value="'+esc(x.project)+'" oninput="R.draftField(\'project\',this.value)"></label></div>'
+    +'<label class="field"><span>Notiz</span><textarea placeholder="Details…" oninput="R.draftField(\'notes\',this.value)">'+esc(x.notes)+'</textarea></label>'
+    +'<button class="btn primary block" style="margin-bottom:10px" onclick="R.saveTask()">Speichern</button>'
+    +(x.dueISO||sheetDraft.dueISO?'<button class="btn subtle block" style="margin-bottom:10px" onclick="R.saveTaskAndICS()">Speichern &amp; in Apple Kalender</button>':'')
+    +(id?'<button class="btn ghost danger block" onclick="R.delTask(\''+id+'\')">Löschen</button>':''));
+}
+function saveTask(){ const x=sheetDraft; if(!x.title.trim()){ alert("Bitte einen Titel eingeben."); return; } delete x._isNew;
+  const idx=state.tasks.findIndex(t=>t.id===x.id); if(idx>=0) state.tasks[idx]=x; else state.tasks.push(x); closeSheet(); save(); }
+function saveTaskAndICS(){ const id=sheetDraft.id; saveTask(); taskToICS(id); }
+function delTask(id){ if(confirm("Aufgabe löschen?")){ state.tasks=state.tasks.filter(t=>t.id!==id); closeSheet(); save(); } }
+/* .ics mit Alarm erzeugen -> Apple Kalender erinnert echt. */
+function taskToICS(id){
+  const x=state.tasks.find(t=>t.id===id); if(!x||!x.dueISO) return;
+  const date=x.dueISO.replace(/-/g,""); const time=(x.dueTime||"09:00").replace(":","");
+  const dtstart=date+"T"+time+"00"; const uidv=x.id+"@regimen";
+  const ics=["BEGIN:VCALENDAR","VERSION:2.0","PRODID:-//Regimen//DE","CALSCALE:GREGORIAN","BEGIN:VEVENT",
+    "UID:"+uidv,"DTSTART:"+dtstart,"DURATION:PT30M","SUMMARY:"+icsEsc(x.title),
+    (x.notes?"DESCRIPTION:"+icsEsc(x.notes):"DESCRIPTION:Regimen-Aufgabe"),
+    "BEGIN:VALARM","ACTION:DISPLAY","DESCRIPTION:"+icsEsc(x.title),"TRIGGER:-PT15M","END:VALARM",
+    "END:VEVENT","END:VCALENDAR"].join("\r\n");
+  const blob=new Blob([ics],{type:"text/calendar;charset=utf-8"});
+  const a=document.createElement("a"); a.href=URL.createObjectURL(blob); a.download=(x.title||"aufgabe").replace(/[^\w-]+/g,"_").slice(0,40)+".ics";
+  document.body.appendChild(a); a.click(); a.remove(); setTimeout(()=>URL.revokeObjectURL(a.href),1000);
+}
+function icsEsc(s){ return String(s||"").replace(/\\/g,"\\\\").replace(/;/g,"\\;").replace(/,/g,"\\,").replace(/\n/g,"\\n"); }
+
+/* =========================================================================
+   7) GYM — überarbeitet, mit Fortschritts-Übersicht
+   ========================================================================= */
+function renderGym(){
+  const seg='<div class="segment">'
+    +'<button class="'+(gymTab==="track"?"active":"")+'" onclick="R.setGymTab(\'track\')">Tracken</button>'
+    +'<button class="'+(gymTab==="plan"?"active":"")+'" onclick="R.setGymTab(\'plan\')">Pläne</button>'
+    +'<button class="'+(gymTab==="progress"?"active":"")+'" onclick="R.setGymTab(\'progress\')">Fortschritt</button>'
+    +'<button class="'+(gymTab==="log"?"active":"")+'" onclick="R.setGymTab(\'log\')">Verlauf</button></div>';
+  if(gymTab==="track") return seg+renderGymTrack();
+  if(gymTab==="plan") return seg+renderGymPlan();
+  if(gymTab==="progress") return seg+renderGymProgress();
+  return seg+renderGymLog();
+}
+function setGymTab(t){ gymTab=t; render(); window.scrollTo(0,0); }
+function sessionsThisWeek(){ const now=new Date(); const monday=new Date(now); monday.setDate(now.getDate()-((now.getDay()+6)%7)); const miso=isoOf(monday); return state.logs.filter(l=>l.dateISO>=miso).length; }
+function renderGymTrack(){
+  if(!state.plan.workouts.length) return emptyState("Noch kein Plan","Lege unter „Pläne“ dein erstes Workout an.",'<button class="btn primary" onclick="R.setGymTab(\'plan\')">Zu den Plänen</button>');
+  if(activeSession) return renderLogger();
+  let h='<div class="eyebrow"><span>Heute trainieren</span><span>'+sessionsThisWeek()+' diese Woche</span></div>';
+  state.plan.workouts.forEach(w=>{ const lastDate=lastWorkoutDate(w.id);
+    h+='<div class="card lead" onclick="R.startSession(\''+w.id+'\')" style="cursor:pointer"><div class="row between"><div class="stack"><span class="title">'+esc(w.name)+'</span><span class="sub">'+w.exercises.length+' Übungen'+(lastDate?" · zuletzt "+fmtDateShort(lastDate):"")+'</span></div><span class="btn primary sm">Start</span></div></div>'; });
+  return h;
+}
+function lastWorkoutDate(id){ for(let i=state.logs.length-1;i>=0;i--) if(state.logs[i].workoutId===id) return state.logs[i].dateISO; return null; }
+function renderLogger(){
+  const s=activeSession;
+  let h='<div class="row between" style="margin:2px 0 14px"><div class="stack"><span class="title serif" style="font-size:20px">'+esc(s.workoutName)+'</span><span class="sub">'+fmtDate(s.dateISO)+'</span></div><button class="icon-btn" onclick="R.cancelSession()">Abbrechen</button></div>';
+  s.entries.forEach((en,ei)=>{ const last=lastPerformance(en.exerciseName);
+    const lt=last?("Letztes Mal · "+fmtDate(last.date)+": "+last.sets.map(x=>x.weight+"kg×"+x.reps).join("  ")):"Keine Referenz – erster Eintrag";
+    h+='<div class="card"><div class="row between"><span class="title">'+esc(en.exerciseName)+'</span><span class="tiny">Ziel '+esc(en.target||"")+'</span></div><div class="lastref '+(last?"":"none")+'">'+esc(lt)+'</div><div style="margin-top:12px">';
+    en.sets.forEach((set,si)=>{ h+='<div class="setrow"><span class="idx">'+(si+1)+'</span><input type="number" inputmode="decimal" placeholder="kg" value="'+(set.weight==null?"":set.weight)+'" oninput="R.updSet('+ei+','+si+',\'weight\',this.value)"><input type="number" inputmode="numeric" placeholder="Wdh" value="'+(set.reps==null?"":set.reps)+'" oninput="R.updSet('+ei+','+si+',\'reps\',this.value)"><button class="icon-btn" onclick="R.delSet('+ei+','+si+')">✕</button></div>'; });
+    h+='<button class="btn ghost block" style="margin-top:4px" onclick="R.addSet('+ei+')">+ Satz</button></div></div>'; });
+  h+='<div class="spacer"></div><button class="btn primary block" onclick="R.finishSession()">Session speichern</button>';
+  return h;
+}
+function startSession(id){ const w=state.plan.workouts.find(x=>x.id===id); activeSession={ workoutId:id, workoutName:w.name, dateISO:todayISO(), entries:w.exercises.map(ex=>({exerciseName:ex.name,target:ex.sets+"×"+ex.reps,sets:[]})) }; render(); window.scrollTo(0,0); }
+function addSet(ei){ const s=activeSession.entries[ei].sets; const p=s[s.length-1]; s.push(p?{weight:p.weight,reps:p.reps}:{weight:"",reps:""}); render(); }
+function delSet(ei,si){ activeSession.entries[ei].sets.splice(si,1); render(); }
+function updSet(ei,si,k,v){ activeSession.entries[ei].sets[si][k]=v===""?"":Number(v); }
+function cancelSession(){ if(confirm("Session verwerfen? Nicht gespeicherte Sätze gehen verloren.")){ activeSession=null; render(); } }
+function finishSession(){ const entries=activeSession.entries.map(en=>({exerciseName:en.exerciseName,sets:en.sets.filter(s=>s.weight!==""&&s.reps!=="")})).filter(en=>en.sets.length);
+  if(!entries.length){ alert("Noch keine Sätze eingetragen."); return; }
+  state.logs.push({id:uid(),dateISO:activeSession.dateISO,workoutId:activeSession.workoutId,workoutName:activeSession.workoutName,entries});
+  activeSession=null; gymTab="progress"; save(); }
+function renderGymPlan(){
+  let h="";
+  state.plan.workouts.forEach(w=>{ h+='<div class="card"><div class="row between"><span class="title serif" style="font-size:18px">'+esc(w.name)+'</span><div class="row" style="gap:2px"><button class="icon-btn" onclick="R.shareWorkout(\''+w.id+'\')">↗</button><button class="icon-btn" onclick="R.editWorkout(\''+w.id+'\')">✎</button><button class="icon-btn danger" onclick="R.delWorkout(\''+w.id+'\')">🗑</button></div></div>';
+    w.exercises.forEach(ex=>{ h+='<div class="row between" style="padding:7px 0;border-top:1px solid var(--line)"><span class="sub" style="color:var(--text)">'+esc(ex.name)+'</span><span class="tiny">'+ex.sets+'×'+ex.reps+'</span></div>'; });
+    h+='</div>'; });
+  h+='<button class="btn subtle block" onclick="R.editWorkout()">+ Workout anlegen</button>';
+  return h;
+}
+function delWorkout(id){ if(confirm("Workout löschen? Gespeicherte Sessions bleiben im Verlauf.")){ state.plan.workouts=state.plan.workouts.filter(w=>w.id!==id); save(); } }
+function editWorkout(id){ const w=id?state.plan.workouts.find(x=>x.id===id):{id:uid(),name:"",exercises:[]}; sheetDraft=JSON.parse(JSON.stringify(w)); sheetDraft._isNew=!id; renderWorkoutSheet(); }
+function renderWorkoutSheet(){
+  const w=sheetDraft; let ex="";
+  w.exercises.forEach((e,i)=>{ ex+='<div class="card" style="margin-bottom:8px"><div class="row between" style="margin-bottom:8px"><input type="text" placeholder="Übung" value="'+esc(e.name)+'" oninput="R.draftExField('+i+',\'name\',this.value)" style="margin-right:8px"><button class="icon-btn danger" onclick="R.draftExDel('+i+')">✕</button></div><div class="grid2"><label class="field" style="margin:0"><span>Sätze</span><input type="number" inputmode="numeric" value="'+e.sets+'" oninput="R.draftExField('+i+',\'sets\',this.value)"></label><label class="field" style="margin:0"><span>Wdh</span><input type="number" inputmode="numeric" value="'+e.reps+'" oninput="R.draftExField('+i+',\'reps\',this.value)"></label></div></div>'; });
+  openSheet('<h2>'+(w._isNew?"Workout anlegen":"Workout bearbeiten")+'</h2><label class="field"><span>Name</span><input type="text" placeholder="z. B. Push" value="'+esc(w.name)+'" oninput="R.draftField(\'name\',this.value)"></label><div class="eyebrow">Übungen</div>'+(ex||'<p class="tiny" style="margin:0 2px 12px">Noch keine Übungen.</p>')+'<button class="btn ghost block" style="margin-bottom:14px" onclick="R.draftExAdd()">+ Übung</button><button class="btn primary block" onclick="R.saveWorkout()">Speichern</button>');
+}
+function saveWorkout(){ const w=sheetDraft; if(!w.name.trim()){ alert("Bitte einen Namen vergeben."); return; } w.exercises=w.exercises.filter(e=>e.name.trim()); delete w._isNew; const idx=state.plan.workouts.findIndex(x=>x.id===w.id); if(idx>=0) state.plan.workouts[idx]=w; else state.plan.workouts.push(w); closeSheet(); save(); }
+/* Fortschritt: pro Übung Verlauf des schwersten Satzes + PR + Delta */
+function exerciseHistory(){ const map={}; state.logs.forEach(l=>l.entries.forEach(en=>{ const t=topSet(en.sets).weight; (map[en.exerciseName]=map[en.exerciseName]||[]).push({dateISO:l.dateISO,top:t,reps:topSet(en.sets).reps}); })); return map; }
+function renderGymProgress(){
+  const hist=exerciseHistory(); const names=Object.keys(hist);
+  if(!names.length) return emptyState("Noch keine Daten","Logge ein paar Sessions – hier siehst du dann pro Übung deine Entwicklung und Rekorde.");
+  names.sort((a,b)=>{ const la=hist[a][hist[a].length-1].dateISO, lb=hist[b][hist[b].length-1].dateISO; return la<lb?1:-1; });
+  let h='<div class="eyebrow">Entwicklung pro Übung</div>';
+  names.forEach(n=>{ const arr=hist[n]; const tops=arr.map(x=>x.top); const pr=Math.max.apply(null,tops);
+    const cur=arr[arr.length-1].top, first=arr[0].top; const delta=+(cur-first).toFixed(1);
+    const isPR=cur>=pr; const dlabel=delta>0?"▲ +"+delta+" kg":(delta<0?"▼ "+delta+" kg":"±0");
+    h+='<div class="card lead"><div class="row between"><div class="stack"><span class="title">'+esc(n)+'</span><span class="sub">Aktuell '+cur+' kg'+(isPR?' <span class="pr">🏆 PR</span>':"")+'</span></div><span class="delta '+(delta>0?"up":"flat")+'">'+dlabel+'</span></div>';
+    if(arr.length>=2) h+='<div style="margin-top:10px">'+progressChart(arr)+'</div>';
+    h+='<div class="row between" style="margin-top:8px"><span class="tiny">Rekord '+pr+' kg</span><span class="tiny">'+arr.length+' Session(s)</span></div></div>'; });
+  return h;
+}
+function progressChart(arr){
+  const w=320,hg=70,tops=arr.map(a=>a.top),mn=Math.min.apply(null,tops),mx=Math.max.apply(null,tops),rg=(mx-mn)||1;
+  const X=i=>arr.length>1?i/(arr.length-1)*w:w/2, Y=v=>hg-((v-mn)/rg)*(hg-14)-7;
+  const line=arr.map((a,i)=>X(i).toFixed(1)+","+Y(a.top).toFixed(1)).join(" ");
+  const dots=arr.map((a,i)=>'<circle cx="'+X(i).toFixed(1)+'" cy="'+Y(a.top).toFixed(1)+'" r="2.6" fill="var(--good)"/>').join("");
+  const area="0,"+hg+" "+line+" "+w+","+hg;
+  return '<svg viewBox="0 0 '+w+' '+hg+'" width="100%" height="'+hg+'" preserveAspectRatio="none"><polygon points="'+area+'" fill="rgba(125,155,118,.10)"/><polyline points="'+line+'" fill="none" stroke="var(--good)" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>'+dots+'</svg>';
+}
+function renderGymLog(){
+  if(!state.logs.length) return emptyState("Noch kein Verlauf","Gespeicherte Sessions erscheinen hier – mit Vergleich zur letzten Leistung.");
+  let h="";
+  state.logs.slice().reverse().forEach(log=>{ h+='<div class="card lead"><div class="row between"><div class="stack"><span class="title">'+esc(log.workoutName)+'</span><span class="sub">'+fmtDate(log.dateISO)+'</span></div><button class="icon-btn danger" onclick="R.delLog(\''+log.id+'\')">🗑</button></div>';
+    log.entries.forEach(en=>{ const st=en.sets.map(s=>s.weight+"×"+s.reps).join("  ·  "); h+='<div style="padding:8px 0;border-top:1px solid var(--line)"><div class="row between"><span class="sub" style="color:var(--text)">'+esc(en.exerciseName)+'</span>'+deltaBadge(log,en)+'</div><span class="tiny">'+st+' <span style="color:var(--faint)">(kg×Wdh)</span></span></div>'; });
+    h+='</div>'; });
+  return h;
+}
+function deltaBadge(log,en){ const idx=state.logs.findIndex(l=>l.id===log.id);
+  for(let i=idx-1;i>=0;i--){ const prev=state.logs[i].entries.find(e=>e.exerciseName===en.exerciseName); if(prev&&prev.sets.length){ const d=topSet(en.sets).weight-topSet(prev.sets).weight; if(d>0) return '<span class="delta up">▲ +'+d+' kg</span>'; if(d===0) return '<span class="delta flat">=</span>'; return '<span class="delta flat">▼ '+d+' kg</span>'; } } return ""; }
+function delLog(id){ if(confirm("Diesen Eintrag aus dem Verlauf löschen?")){ state.logs=state.logs.filter(l=>l.id!==id); save(); } }
+
+/* =========================================================================
+   8) MEHR — Übersichtsscreen
+   ========================================================================= */
+function renderMore(){
+  let h='<div class="screen-title">Mehr</div><div class="spacer"></div><div class="card">';
+  h+=moreRow("Supplements","R.go(\'supps\')");
+  h+=moreRow("Pflege","R.go(\'skin\')");
+  h+=moreRow("Notizen","R.go(\'notes\')");
+  h+=moreRow("Körper · Gewicht &amp; Maße","R.go(\'body\')");
+  h+='</div><div class="card">';
+  h+=moreRow("Geteiltes empfangen","R.openReceive()");
+  h+=moreRow("Daten &amp; Backup","R.openData()");
+  h+='</div>';
+  return h;
+}
+function moreRow(label,action){ return '<button class="menurow" onclick="'+action+'">'+label+'<span class="ar">›</span></button>'; }
+
+/* =========================================================================
+   9) SUPPLEMENTS
+   ========================================================================= */
+function renderSupps(){
+  const t=todayISO();
+  let h='<button class="back" onclick="R.go(\'more\')">‹ Mehr</button><div class="row between" style="margin:6px 2px 0"><div class="screen-title" style="margin:0">Supplements</div>'+(suppKeys().length?streakBadge(streak(suppKeys())):'')+'</div><div class="sub" style="margin:2px 2px 8px">Heute · '+fmtDate(t)+'</div>';
+  if(!state.supps.length){ h+=emptyState("Kein Stack","Trag deine Supplements ein – mit Dosis und Timing."); }
+  else{ h+='<div class="card">'; state.supps.forEach(s=>{ const done=!!(state.checks[t]&&state.checks[t][s.id]);
+    h+='<div class="check '+(done?"done":"")+'" onclick="R.toggleCheck(\''+s.id+'\')"><span class="box">'+checkSvg()+'</span><div class="stack" style="flex:1"><span class="title">'+esc(s.name)+'</span><span class="sub">'+esc([s.dose,s.timing].filter(Boolean).join(" · ")||"—")+'</span></div><button class="icon-btn" onclick="event.stopPropagation();R.shareSupp(\''+s.id+'\')">↗</button><button class="icon-btn" onclick="event.stopPropagation();R.editSupp(\''+s.id+'\')">✎</button></div>'; }); h+='</div>'; }
+  h+='<button class="btn subtle block" style="margin-top:6px" onclick="R.editSupp()">+ Supplement</button>';
+  return h;
+}
+function editSupp(id){ const s=id?state.supps.find(x=>x.id===id):{id:uid(),name:"",dose:"",timing:""}; sheetDraft=Object.assign({},s,{_isNew:!id});
+  openSheet('<h2>'+(id?"Supplement":"Neues Supplement")+'</h2><label class="field"><span>Name</span><input type="text" placeholder="z. B. Kreatin" value="'+esc(s.name)+'" oninput="R.draftField(\'name\',this.value)"></label><div class="grid2"><label class="field"><span>Dosis</span><input type="text" placeholder="5 g" value="'+esc(s.dose)+'" oninput="R.draftField(\'dose\',this.value)"></label><label class="field"><span>Timing</span><input type="text" placeholder="morgens" value="'+esc(s.timing)+'" oninput="R.draftField(\'timing\',this.value)"></label></div><div class="row between"><button class="btn primary" onclick="R.saveSupp()" style="flex:1;margin-right:8px">Speichern</button>'+(id?'<button class="btn ghost danger" onclick="R.delSupp(\''+id+'\')">Löschen</button>':'')+'</div>'); }
+function saveSupp(){ const s=sheetDraft; if(!s.name.trim()){ alert("Bitte einen Namen vergeben."); return; } delete s._isNew; const idx=state.supps.findIndex(x=>x.id===s.id); if(idx>=0) state.supps[idx]=s; else state.supps.push(s); closeSheet(); save(); }
+function delSupp(id){ if(confirm("Supplement löschen?")){ state.supps=state.supps.filter(s=>s.id!==id); closeSheet(); save(); } }
+
+/* =========================================================================
+   10) PFLEGE
+   ========================================================================= */
+function renderSkin(){
+  const t=todayISO();
+  let h='<button class="back" onclick="R.go(\'more\')">‹ Mehr</button><div class="screen-title">Pflege</div><div class="spacer"></div>';
+  h+='<div class="segment"><button class="'+(skinTab==="morning"?"active":"")+'" onclick="R.setSkinTab(\'morning\')">Morgens</button><button class="'+(skinTab==="evening"?"active":"")+'" onclick="R.setSkinTab(\'evening\')">Abends</button></div>';
+  const list=state.skin[skinTab];
+  if(!list.length){ h+=emptyState("Keine Routine","Bau dir die "+(skinTab==="morning"?"Morgen":"Abend")+"-Routine Schritt für Schritt auf."); }
+  else{ h+='<div class="card">'; list.forEach((step,i)=>{ const key=skinTab+":"+step.id; const done=!!(state.checks[t]&&state.checks[t][key]);
+    h+='<div class="check '+(done?"done":"")+'" onclick="R.toggleCheck(\''+key+'\')"><span class="box">'+checkSvg()+'</span><div class="stack" style="flex:1"><span class="title">'+esc(step.name)+'</span>'+(step.note?'<span class="sub">'+esc(step.note)+'</span>':'')+'</div><button class="icon-btn" onclick="event.stopPropagation();R.delSkin('+i+')">✕</button></div>'; }); h+='</div>'; }
+  h+='<div class="row" style="gap:8px;margin-top:6px"><input type="text" id="skinInput" placeholder="Produkt / Schritt hinzufügen" onkeydown="if(event.key===\'Enter\')R.addSkin()"><button class="btn primary" onclick="R.addSkin()" style="padding:11px 18px">+</button></div>';
+  return h;
+}
+function setSkinTab(t){ skinTab=t; render(); window.scrollTo(0,0); }
+function addSkin(){ const inp=document.getElementById("skinInput"); const v=inp.value.trim(); if(!v) return; state.skin[skinTab].push({id:uid(),name:v,note:""}); save(); }
+function delSkin(i){ state.skin[skinTab].splice(i,1); save(); }
+
+/* =========================================================================
+   11) LINKS
+   ========================================================================= */
+function renderLinks(){
+  const cats=state.library.categories;
+  let chips='<div class="chips"><span class="chip '+(libCat==="all"?"active":"")+'" onclick="R.setLibCat(\'all\')">Alle</span>';
+  cats.forEach(c=>{ chips+='<span class="chip '+(libCat===c.id?"active":"")+'" onclick="R.setLibCat(\''+c.id+'\')">'+esc(c.name)+'</span>'; });
+  chips+='<span class="chip manage" onclick="R.openCats()">✎ Kategorien</span></div>';
+  let links=state.library.links.slice().reverse(); if(libCat!=="all") links=links.filter(l=>l.catId===libCat);
+  let body;
+  if(!state.library.links.length) body=emptyState("Bibliothek leer","Speichere YouTube-Videos und Links – einsortiert in deine Kategorien.");
+  else if(!links.length) body=emptyState("Nichts in dieser Kategorie","Tippe unten auf „+ Link“.");
+  else{ body=""; links.forEach(l=>{ const cat=cats.find(c=>c.id===l.catId);
+    const thumb=l.videoId?'<img class="thumb" src="'+ytThumb(l.videoId)+'" onerror="this.style.display=\'none\'" alt="">':'<div class="thumb placeholder">🔗</div>';
+    body+='<div class="card"><div class="linkcard" onclick="R.openLink(\''+l.id+'\')" style="cursor:pointer">'+thumb+'<div class="stack" style="flex:1"><span class="title truncate">'+esc(l.title||"Ohne Titel")+'</span>'+(l.summary?'<span class="sub" style="white-space:normal">'+esc(l.summary)+'</span>':'')+'<span class="tiny">'+(cat?esc(cat.name):"—")+'</span></div></div><div class="row" style="justify-content:flex-end;gap:2px;margin-top:6px"><button class="icon-btn" onclick="R.shareLink(\''+l.id+'\')">↗</button><button class="icon-btn" onclick="R.editLink(\''+l.id+'\')">✎</button><button class="icon-btn danger" onclick="R.delLink(\''+l.id+'\')">🗑</button></div></div>'; }); }
+  return chips+body+'<button class="btn subtle block" style="margin-top:6px" onclick="R.editLink()">+ Link</button>';
+}
+function setLibCat(id){ libCat=id; render(); }
+function openLink(id){ const l=state.library.links.find(x=>x.id===id); if(l) window.open(l.url,"_blank","noopener"); }
+function editLink(id){
+  const l=id?state.library.links.find(x=>x.id===id):{id:uid(),url:"",title:"",summary:"",videoId:null,catId:(libCat!=="all"?libCat:state.library.categories[0].id)};
+  sheetDraft=Object.assign({},l,{_isNew:!id});
+  const opts=state.library.categories.map(c=>'<option value="'+c.id+'" '+(c.id===sheetDraft.catId?"selected":"")+'>'+esc(c.name)+'</option>').join("");
+  openSheet('<h2>'+(id?"Link bearbeiten":"Link speichern")+'</h2><label class="field"><span>URL (YouTube oder beliebig)</span><input type="url" id="linkUrl" placeholder="https://youtube.com/…" value="'+esc(l.url)+'" oninput="R.draftField(\'url\',this.value)"></label><button class="btn ghost block sm" style="margin-bottom:12px" onclick="R.loadLinkMeta()">Vorschau laden (Titel &amp; Thumbnail)</button><div id="linkPreview"></div><label class="field"><span>Titel</span><input type="text" id="linkTitle" placeholder="Titel" value="'+esc(l.title)+'" oninput="R.draftField(\'title\',this.value)"></label><label class="field"><span>Zusammenfassung</span><textarea placeholder="Worum geht es? Deine Notiz dazu." oninput="R.draftField(\'summary\',this.value)">'+esc(l.summary)+'</textarea></label><label class="field"><span>Kategorie</span><select onchange="R.draftField(\'catId\',this.value)">'+opts+'</select></label><div class="row between"><button class="btn primary" onclick="R.saveLink()" style="flex:1;margin-right:8px">Speichern</button>'+(id?'<button class="btn ghost danger" onclick="R.delLink(\''+id+'\')">Löschen</button>':'')+'</div>');
+  if(l.videoId) renderLinkPreview(l.videoId);
+}
+async function loadLinkMeta(){ const url=(document.getElementById("linkUrl")||{}).value||sheetDraft.url; sheetDraft.url=url; const id=ytId(url); sheetDraft.videoId=id||null; if(id) renderLinkPreview(id); if(id){ const title=await fetchYtTitle(url); if(title){ sheetDraft.title=title; const ti=document.getElementById("linkTitle"); if(ti&&!ti.value) ti.value=title; } } }
+function renderLinkPreview(id){ const box=document.getElementById("linkPreview"); if(box) box.innerHTML='<img class="thumb" style="width:100%;height:auto;margin-bottom:12px" src="'+ytThumb(id)+'" onerror="this.style.display=\'none\'" alt="">'; }
+function saveLink(){ const l=sheetDraft; if(!l.url.trim()){ alert("Bitte eine URL eingeben."); return; } if(!l.videoId) l.videoId=ytId(l.url)||null; if(!l.title.trim()) l.title=l.url; delete l._isNew; const idx=state.library.links.findIndex(x=>x.id===l.id); if(idx>=0) state.library.links[idx]=l; else state.library.links.push(l); closeSheet(); save(); }
+function delLink(id){ if(confirm("Link löschen?")){ state.library.links=state.library.links.filter(l=>l.id!==id); closeSheet(); save(); } }
+function openCats(){ let rows=""; state.library.categories.forEach((c,i)=>{ rows+='<div class="row between" style="padding:8px 0;border-bottom:1px solid var(--line)"><input type="text" value="'+esc(c.name)+'" oninput="R.renameCat('+i+',this.value)" style="margin-right:8px"><button class="icon-btn danger" onclick="R.delCat('+i+')">✕</button></div>'; });
+  openSheet('<h2>Kategorien</h2>'+rows+'<div class="row" style="gap:8px;margin-top:12px"><input type="text" id="newCat" placeholder="Neue Kategorie" onkeydown="if(event.key===\'Enter\')R.addCat()"><button class="btn primary" onclick="R.addCat()" style="padding:11px 18px">+</button></div><button class="btn subtle block" style="margin-top:14px" onclick="R.closeSheet()">Fertig</button>'); }
+function renameCat(i,v){ state.library.categories[i].name=v; Store.write(state); }
+function addCat(){ const inp=document.getElementById("newCat"); const v=inp.value.trim(); if(!v) return; state.library.categories.push({id:uid(),name:v}); save(); openCats(); }
+function delCat(i){ const c=state.library.categories[i]; const used=state.library.links.filter(l=>l.catId===c.id).length; if(!confirm("Kategorie „"+c.name+"“ löschen?"+(used?" "+used+" Link(s) werden auf „Ohne Kategorie“ gesetzt.":""))) return; state.library.links.forEach(l=>{ if(l.catId===c.id) l.catId=""; }); state.library.categories.splice(i,1); if(libCat===c.id) libCat="all"; save(); openCats(); }
+
+/* =========================================================================
+   12) NOTIZEN
+   ========================================================================= */
+function renderNotes(){
+  let h='<button class="back" onclick="R.go(\'more\')">‹ Mehr</button><div class="screen-title">Notizen</div><button class="btn subtle block" style="margin:12px 0 14px" onclick="R.editNote()">+ Neue Notiz</button>';
+  if(!state.notes.length) return h+emptyState("Keine Notizen","Gedanken, Pläne, alles außerhalb des Gyms.");
+  state.notes.slice().sort((a,b)=>b.updated-a.updated).forEach(n=>{ const fl=(n.body||"").split("\n")[0]||"—"; h+='<div class="card lead" onclick="R.editNote(\''+n.id+'\')" style="cursor:pointer"><div class="stack"><span class="title truncate">'+esc(n.title||"Ohne Titel")+'</span><span class="sub truncate">'+esc(fl)+'</span><span class="tiny">'+fmtDate(isoFromTs(n.updated))+'</span></div></div>'; });
+  return h;
+}
+function editNote(id){ const n=id?state.notes.find(x=>x.id===id):{id:uid(),title:"",body:"",updated:Date.now()}; sheetDraft=Object.assign({},n,{_isNew:!id});
+  openSheet('<h2>'+(id?"Notiz":"Neue Notiz")+'</h2><label class="field"><span>Titel</span><input type="text" placeholder="Titel" value="'+esc(n.title)+'" oninput="R.draftField(\'title\',this.value)"></label><label class="field"><span>Text</span><textarea placeholder="…" style="min-height:140px" oninput="R.draftField(\'body\',this.value)">'+esc(n.body)+'</textarea></label><div class="row between"><button class="btn primary" onclick="R.saveNote()" style="flex:1;margin-right:8px">Speichern</button>'+(id?'<button class="btn ghost danger" onclick="R.delNote(\''+id+'\')">Löschen</button>':'')+'</div>'); }
+function saveNote(){ const n=sheetDraft; if(!n.title.trim()&&!n.body.trim()){ closeSheet(); return; } n.updated=Date.now(); delete n._isNew; const idx=state.notes.findIndex(x=>x.id===n.id); if(idx>=0) state.notes[idx]=n; else state.notes.push(n); closeSheet(); save(); }
+function delNote(id){ if(confirm("Notiz löschen?")){ state.notes=state.notes.filter(n=>n.id!==id); closeSheet(); save(); } }
+
+/* =========================================================================
+   13) KÖRPER
+   ========================================================================= */
+function renderBody(){
+  let h='<button class="back" onclick="R.go(\'more\')">‹ Mehr</button><div class="screen-title">Körper</div>';
+  const w=state.body.weights;
+  h+='<div class="card lead"><div class="eyebrow" style="margin-top:0">Gewicht</div>';
+  if(w.length>=2) h+='<div style="margin:4px 0 10px">'+bigSpark(w.map(x=>x.kg))+'</div>';
+  if(w.length){ const c=w[w.length-1]; h+='<div class="row between"><span class="title">'+c.kg+' kg</span><span class="sub">'+fmtDate(c.dateISO)+'</span></div>'; } else h+='<div class="sub">Noch nichts erfasst.</div>';
+  h+='<div class="row" style="gap:8px;margin-top:12px"><input type="number" inputmode="decimal" id="wInput" placeholder="kg heute"><button class="btn primary" onclick="R.addWeight()" style="padding:11px 18px">+</button></div>';
+  if(w.length){ h+='<div class="eyebrow">Letzte Einträge</div>'; w.slice(-8).reverse().forEach((x,i)=>{ const realIdx=w.length-1-i; h+='<div class="row between" style="padding:7px 0;border-top:1px solid var(--line)"><span class="sub" style="color:var(--text)">'+x.kg+' kg</span><div class="row" style="gap:8px"><span class="tiny">'+fmtDate(x.dateISO)+'</span><button class="icon-btn danger" onclick="R.delWeight('+realIdx+')">✕</button></div></div>'; }); }
+  h+='</div>';
+  h+='<div class="card"><div class="eyebrow" style="margin-top:0">Maße</div>';
+  if(!state.body.measures.length) h+='<div class="sub" style="margin-bottom:6px">z. B. Arm, Brust, Taille, Oberschenkel.</div>';
+  state.body.measures.forEach((m,i)=>{ h+='<div class="row between" style="padding:8px 0;border-top:1px solid var(--line)"><div class="stack"><span class="sub" style="color:var(--text)">'+esc(m.name)+'</span><span class="tiny">'+(m.dateISO?fmtDate(m.dateISO):"—")+'</span></div><div class="row" style="gap:8px"><span class="title">'+esc(m.value||"—")+'</span><button class="icon-btn" onclick="R.editMeasure('+i+')">✎</button><button class="icon-btn danger" onclick="R.delMeasure('+i+')">✕</button></div></div>'; });
+  h+='<button class="btn ghost block sm" style="margin-top:12px" onclick="R.editMeasure()">+ Maß hinzufügen</button></div>';
+  return h;
+}
+function bigSpark(vals){ const w=320,hg=80,mn=Math.min.apply(null,vals),mx=Math.max.apply(null,vals),rg=(mx-mn)||1;
+  const pts=vals.map((v,i)=>(i/(vals.length-1)*w).toFixed(1)+","+(hg-(v-mn)/rg*(hg-10)-5).toFixed(1)); const line=pts.join(" "); const area="0,"+hg+" "+line+" "+w+","+hg;
+  return '<svg viewBox="0 0 '+w+' '+hg+'" width="100%" height="'+hg+'" preserveAspectRatio="none"><polygon points="'+area+'" fill="rgba(125,155,118,.10)"/><polyline points="'+line+'" fill="none" stroke="var(--good)" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>'; }
+function addWeight(){ const inp=document.getElementById("wInput"); const v=parseFloat(String(inp.value).replace(",",".")); if(isNaN(v)){ alert("Bitte eine Zahl eingeben."); return; } const t=todayISO(); const ex=state.body.weights.find(x=>x.dateISO===t); if(ex) ex.kg=v; else state.body.weights.push({dateISO:t,kg:v}); state.body.weights.sort((a,b)=>a.dateISO<b.dateISO?-1:1); save(); }
+function delWeight(i){ state.body.weights.splice(i,1); save(); }
+function editMeasure(i){ const m=(i!=null)?state.body.measures[i]:{name:"",value:"",dateISO:todayISO()}; sheetDraft=Object.assign({},m,{_idx:(i!=null?i:-1)});
+  openSheet('<h2>'+(i!=null?"Maß bearbeiten":"Neues Maß")+'</h2><label class="field"><span>Bezeichnung</span><input type="text" placeholder="z. B. Arm (cm)" value="'+esc(m.name)+'" oninput="R.draftField(\'name\',this.value)"></label><label class="field"><span>Wert</span><input type="text" placeholder="z. B. 38 cm" value="'+esc(m.value)+'" oninput="R.draftField(\'value\',this.value)"></label><button class="btn primary block" onclick="R.saveMeasure()">Speichern</button>'); }
+function saveMeasure(){ const m=sheetDraft; if(!m.name.trim()){ alert("Bitte eine Bezeichnung eingeben."); return; } m.dateISO=todayISO(); const idx=m._idx; delete m._idx; if(idx>=0) state.body.measures[idx]=m; else state.body.measures.push(m); closeSheet(); save(); }
+function delMeasure(i){ if(confirm("Maß löschen?")){ state.body.measures.splice(i,1); save(); } }
+
+/* =========================================================================
+   14) ABHAKEN + Entwurfshelfer
+   ========================================================================= */
+function toggleCheck(itemId){ const t=todayISO(); if(!state.checks[t]) state.checks[t]={}; if(state.checks[t][itemId]) delete state.checks[t][itemId]; else state.checks[t][itemId]=true; save(); }
+function checkSvg(){ return '<svg viewBox="0 0 24 24" fill="none" stroke="#1b1410" stroke-width="3"><path d="M5 13l4 4L19 7"/></svg>'; }
+function draftField(k,v){ if(sheetDraft) sheetDraft[k]=v; }
+function draftExField(i,k,v){ if(!sheetDraft) return; sheetDraft.exercises[i][k]=(k==="name")?v:Number(v); }
+function draftExDel(i){ sheetDraft.exercises.splice(i,1); renderWorkoutSheet(); }
+function draftExAdd(){ sheetDraft.exercises.push({id:uid(),name:"",sets:3,reps:10}); renderWorkoutSheet(); }
+
+/* =========================================================================
+   15) TEILEN & EMPFANGEN
+   ========================================================================= */
+function shareItem(type,data,label){ const payload=encodePayload({app:"regimen",v:4,t:type,d:data}); const url=location.origin+location.pathname+"#r="+payload; const text=label+" – geteilt aus Regimen:";
+  if(navigator.share){ navigator.share({title:"Regimen",text:text,url:url}).catch(e=>{ if(e&&e.name!=="AbortError") fallbackShare(url); }); return; } fallbackShare(url); }
+function fallbackShare(url){ if(navigator.clipboard&&navigator.clipboard.writeText){ navigator.clipboard.writeText(url).then(()=>alert("Link kopiert – schick ihn deinem Kumpel."),()=>prompt("Kopiere diesen Link:",url)); } else prompt("Kopiere diesen Link:",url); }
+function shareWorkout(id){ const w=state.plan.workouts.find(x=>x.id===id); if(!w) return; shareItem("workout",{name:w.name,exercises:w.exercises.map(e=>({name:e.name,sets:e.sets,reps:e.reps}))},"Workout „"+w.name+"“"); }
+function shareSupp(id){ const s=state.supps.find(x=>x.id===id); if(!s) return; shareItem("supp",{name:s.name,dose:s.dose,timing:s.timing},"Supplement „"+s.name+"“"); }
+function shareLink(id){ const l=state.library.links.find(x=>x.id===id); if(!l) return; shareItem("link",{url:l.url,title:l.title,summary:l.summary,videoId:l.videoId},l.title||"Link"); }
+function openReceive(){ closeSheet(true); openSheet('<h2>Geteiltes empfangen</h2><p class="sub" style="margin-top:-8px">Füge den Link oder Code ein, den dir jemand geschickt hat.</p><label class="field"><span>Link / Code</span><input type="text" id="rcvInput" placeholder="https://… oder Code"></label><button class="btn primary block" onclick="R.receiveSubmit()">Vorschau</button>'); }
+function receiveSubmit(){ const el=document.getElementById("rcvInput"); const v=(el?el.value:"").trim(); if(!v) return; let code=v; const i=v.indexOf("#r="); if(i>=0) code=v.slice(i+3); try{ const p=decodePayload(code); if(p&&p.app==="regimen") openImportPreview(p); else alert("Das ist kein Regimen-Code."); }catch(e){ alert("Konnte den Code nicht lesen."); } }
+function openImportPreview(p){ pendingImport=p; const d=p.d; let detail="",actions="";
+  if(p.t==="workout"){ detail='<div class="card lead"><span class="title">'+esc(d.name)+'</span>'+d.exercises.map(e=>'<div class="row between" style="padding:6px 0;border-top:1px solid var(--line)"><span class="sub" style="color:var(--text)">'+esc(e.name)+'</span><span class="tiny">'+e.sets+'×'+e.reps+'</span></div>').join("")+'</div>'; actions='<button class="btn primary block" style="margin-bottom:10px" onclick="R.doImport()">In meine Pläne übernehmen</button>'+(state.plan.workouts.length?'<button class="btn subtle block" onclick="R.openCompareSelect()">Mit meinem Workout vergleichen</button>':''); }
+  else if(p.t==="supp"){ detail='<div class="card lead"><span class="title">'+esc(d.name)+'</span><div class="sub">'+esc([d.dose,d.timing].filter(Boolean).join(" · ")||"—")+'</div></div>'; actions='<button class="btn primary block" onclick="R.doImport()">Zu meinem Stack hinzufügen</button>'; }
+  else if(p.t==="link"){ const thumb=d.videoId?'<img class="thumb" style="width:100%;height:auto;margin-bottom:10px" src="'+ytThumb(d.videoId)+'" onerror="this.style.display=\'none\'">':''; detail='<div class="card lead">'+thumb+'<span class="title">'+esc(d.title||d.url)+'</span>'+(d.summary?'<div class="sub" style="white-space:normal">'+esc(d.summary)+'</div>':'')+'</div>'; actions='<button class="btn primary block" onclick="R.doImport()">In meine Bibliothek speichern</button>'; }
+  else detail='<p class="sub">Unbekannter Typ.</p>';
+  openSheet('<h2>Geteiltes übernehmen</h2>'+detail+actions); }
+function doImport(){ const p=pendingImport; if(!p) return; const d=p.d;
+  if(p.t==="workout"){ state.plan.workouts.push({id:uid(),name:d.name,exercises:d.exercises.map(e=>({id:uid(),name:e.name,sets:e.sets,reps:e.reps}))}); view="gym"; gymTab="plan"; }
+  else if(p.t==="supp"){ state.supps.push({id:uid(),name:d.name,dose:d.dose||"",timing:d.timing||""}); view="supps"; }
+  else if(p.t==="link"){ const cat=state.library.categories.find(c=>/verschied/i.test(c.name))||state.library.categories[0]; state.library.links.push({id:uid(),url:d.url,title:d.title||d.url,summary:d.summary||"",videoId:d.videoId||ytId(d.url)||null,catId:cat?cat.id:""}); view="links"; libCat="all"; }
+  pendingImport=null; closeSheet(); save(); }
+function openCompareSelect(){ const opts=state.plan.workouts.map(w=>'<button class="menurow" onclick="R.compareWith(\''+w.id+'\')">'+esc(w.name)+'<span class="ar">vergleichen ›</span></button>').join(""); openSheet('<h2>Womit vergleichen?</h2>'+opts); }
+function compareWith(myId){ const mine=state.plan.workouts.find(w=>w.id===myId); const theirs=pendingImport.d; const names=[]; const map={};
+  function add(list,key){ list.forEach(e=>{ const k=e.name.trim().toLowerCase(); if(!map[k]){ map[k]={name:e.name,mine:"",theirs:""}; names.push(k); } map[k][key]=e.sets+"×"+e.reps; }); }
+  add(mine.exercises,"mine"); add(theirs.exercises,"theirs");
+  const rows=names.map(k=>{ const r=map[k]; const diff=(r.mine&&r.theirs&&r.mine!==r.theirs); return '<tr><td>'+esc(r.name)+'</td><td'+(diff?' class="diff"':'')+'>'+(r.mine||"—")+'</td><td'+(diff?' class="diff"':'')+'>'+(r.theirs||"—")+'</td></tr>'; }).join("");
+  openSheet('<h2>Vergleich</h2><table class="cmp"><tr><th>Übung</th><th>'+esc(mine.name)+'</th><th>Freund</th></tr>'+rows+'</table><p class="tiny" style="margin-top:12px">Gelb = unterschiedliche Sätze×Wdh.</p><button class="btn primary block" style="margin-top:10px" onclick="R.doImport()">Workout des Freundes übernehmen</button>'); }
+function checkInboundShare(){ if(location.hash&&location.hash.indexOf("#r=")===0){ try{ const p=decodePayload(location.hash.slice(3)); if(p&&p.app==="regimen") openImportPreview(p); }catch(e){} try{ history.replaceState(null,"",location.pathname+location.search); }catch(e){} } }
+
+/* =========================================================================
+   16) SHEET-INFRASTRUKTUR
+   ========================================================================= */
+function openSheet(html){ closeSheet(true); const scrim=document.createElement("div"); scrim.className="scrim"; scrim.id="scrim"; scrim.onclick=()=>closeSheet(); const sheet=document.createElement("div"); sheet.className="sheet"; sheet.id="sheet"; sheet.innerHTML='<div class="grabber"></div>'+html; document.body.appendChild(scrim); document.body.appendChild(sheet); requestAnimationFrame(()=>{ scrim.classList.add("show"); sheet.classList.add("show"); }); }
+function closeSheet(immediate){ const scrim=document.getElementById("scrim"),sheet=document.getElementById("sheet"); if(!scrim) return; if(immediate){ scrim.remove(); sheet.remove(); return; } scrim.classList.remove("show"); sheet.classList.remove("show"); setTimeout(()=>{ scrim.remove(); sheet.remove(); },220); }
+
+/* =========================================================================
+   17) DATEN & WIEDERHERSTELLUNG
+   ========================================================================= */
+function openData(){ closeSheet(true);
+  const bks=Store.backups();
+  let restore="";
+  if(bks.length){ restore='<div class="eyebrow">Automatische Wiederherstellungspunkte</div>'+bks.slice().reverse().map((b,i)=>{ const realIdx=bks.length-1-i; return '<button class="menurow" onclick="R.restoreBackup('+realIdx+')">'+fmtDate(b.day)+' <span class="ar">wiederherstellen ›</span></button>'; }).join(""); }
+  openSheet('<h2>Daten &amp; Backup</h2><p class="sub" style="margin-top:-8px">Alles liegt lokal auf diesem Gerät und wird bei jeder Änderung gespeichert. Zusätzlich werden automatisch die letzten 7 Tage als Wiederherstellungspunkte gesichert.</p><hr class="div"><button class="btn subtle block" style="margin-bottom:10px" onclick="R.exportData()">Backup exportieren (.json)</button><button class="btn subtle block" style="margin-bottom:10px" onclick="document.getElementById(\'importFile\').click()">Backup importieren</button><input type="file" id="importFile" accept="application/json" style="display:none" onchange="R.importData(this)">'+(restore?'<hr class="div">'+restore:'')+'<hr class="div"><button class="btn ghost danger block" onclick="R.resetData()">Alle Daten löschen</button><p class="tiny" style="text-align:center;margin-top:16px">Regimen · lokale PWA</p>'); }
+function exportData(){ const blob=new Blob([JSON.stringify(state,null,2)],{type:"application/json"}); const a=document.createElement("a"); a.href=URL.createObjectURL(blob); a.download="regimen-backup-"+todayISO()+".json"; a.click(); setTimeout(()=>URL.revokeObjectURL(a.href),1000); }
+function importData(input){ const f=input.files[0]; if(!f) return; const r=new FileReader(); r.onload=()=>{ try{ const d=JSON.parse(r.result); if(!d.version) throw new Error("Ungültiges Format"); state=migrate(d); closeSheet(); save(); alert("Backup importiert."); }catch(e){ alert("Konnte die Datei nicht lesen: "+e.message); } }; r.readAsText(f); }
+function restoreBackup(i){ const bks=Store.backups(); const b=bks[i]; if(!b) return; if(!confirm("Auf den Stand von "+fmtDate(b.day)+" zurücksetzen? Der aktuelle Stand wird ersetzt (aber vorher als heutiger Punkt gesichert).")) return; try{ state=migrate(JSON.parse(b.data)); closeSheet(); save(); alert("Wiederhergestellt: "+fmtDate(b.day)); }catch(e){ alert("Konnte nicht wiederherstellen."); } }
+function resetData(){ if(confirm("Wirklich ALLE Daten löschen? Das lässt sich nicht rückgängig machen.")){ state=defaultState(); closeSheet(); save(); } }
+
+/* =========================================================================
+   18) BAUSTEINE + REGISTRIERUNG + START
+   ========================================================================= */
+function emptyState(title,text,action){ return '<div class="empty"><div class="serif">'+esc(title)+'</div><div class="sub" style="margin-bottom:14px">'+esc(text)+'</div>'+(action||"")+'</div>'; }
+
+window.R = {
+  go, closeSheet,
+  setGymTab, startSession, cancelSession, finishSession, addSet, delSet, updSet,
+  editWorkout, delWorkout, saveWorkout, renderWorkoutSheet, draftField, draftExField, draftExDel, draftExAdd, delLog,
+  toggleCheck,
+  setTodoView, calShift, calSelect, toggleTask, editTask, saveTask, saveTaskAndICS, delTask, taskToICS,
+  editSupp, saveSupp, delSupp,
+  setSkinTab, addSkin, delSkin,
+  setLibCat, openLink, editLink, loadLinkMeta, saveLink, delLink, openCats, renameCat, addCat, delCat,
+  editNote, saveNote, delNote,
+  addWeight, delWeight, editMeasure, saveMeasure, delMeasure,
+  shareWorkout, shareSupp, shareLink, openReceive, receiveSubmit, doImport, openCompareSelect, compareWith,
+  openData, exportData, importData, restoreBackup, resetData
+};
+
+render();
+checkInboundShare();
+</script>
+</body>
+</html>
